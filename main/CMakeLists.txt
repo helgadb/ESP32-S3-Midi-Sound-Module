@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS 
+        "main.c"
+        "midi_uart.c"
+        "midi_class_driver_txrx.c"
+        "led_rgb.c"
+        "usb_daemon.c"
+    INCLUDE_DIRS 
+        "."
+    REQUIRES 
+        freertos
+        driver
+        esp_timer
+        nvs_flash
+        led_strip
+    PRIV_REQUIRES 
+        usb
+)
