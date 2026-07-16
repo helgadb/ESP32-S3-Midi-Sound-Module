@@ -38,31 +38,35 @@ void midi_processor_handle_message(uint8_t status, uint8_t data1, uint8_t data2)
                         break;
                 }
             } else {
-                // Pelo padrão MIDI, um Note On com velocidade 0 é equivalente a um Note Off
-                // Útil se você precisar interromper sons (como abafar um prato - Cymbal Choke)
+                // Pelo padrão MIDI, Note On com velocidade 0 é equivalente a um Note Off.
+                // Como bateria usa sons rápidos (one-shot), normalmente não precisamos tratar aqui.
             }
             break;
         }
 
         case 0x80: { // --- EVENTO: NOTE OFF (Nota Solta) ---
-            uint8_t note = data1;
-            // Tratar interrupção de notas de sustentação se necessário
+            // Variável 'note' comentada para evitar o erro de compilação "unused variable"
+            // uint8_t note = data1;
+            
+            // Tratar interrupção de notas de sustentação se necessário (ex: abafar pratos)
             break;
         }
 
         case 0xB0: { // --- EVENTO: CONTROL CHANGE (CC) ---
-            uint8_t controller = data1;
-            uint8_t value = data2;
+            // Variáveis comentadas para evitar erro de compilação.
+            // Descomente-as quando for implementar o pedal de expressão do Chimbal.
+            // uint8_t controller = data1;
+            // uint8_t value = data2;
 
-            // Exemplo: Pedal de expressão do Chimbal (geralmente CC 4)
-            if (controller == 4) {
-                // open_hihat_amount = value; // Guarda o quanto o pedal está aberto/fechado
-            }
+            // Exemplo de estrutura futura:
+            // if (controller == 4) {
+            //     // open_hihat_amount = value; 
+            // }
             break;
         }
 
         default:
-            // Outros tipos de mensagem (Pitch Bend, Program Change, etc.) podem ser ignorados por enquanto
+            // Outros tipos de mensagem (Pitch Bend, Program Change, etc.) são ignorados
             break;
     }
 }
