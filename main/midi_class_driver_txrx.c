@@ -16,6 +16,7 @@
 #include "esp_mac.h"
 
 #include "midi_class_driver_txrx.h"
+#include "midi_processor.h" // Centraliza o tratamento MIDI
 
 // Hook into UART queueing provided by midi_uart
 // Returns true if the packet was queued successfully (non-blocking), false otherwise
@@ -101,11 +102,20 @@ static void midi_usb_host_rx_callback(usb_transfer_t *transfer) {
         
         // Print cada mensagem separadamente (debug)
         for(int i = 0; i < num_messages; i++) {
-            ESP_LOGD(DRIVER_TAG, "MIDI[%d]: %02X %02X %02X %02X", i,
-                    transfer->data_buffer[offset],
-                    transfer->data_buffer[offset + 1],
-                    transfer->data_buffer[offset + 2],
-                    transfer->data_buffer[offset + 3]);
+            //ESP_LOGD(DRIVER_TAG, "MIDI[%d]: %02X %02X %02X %02X", i,
+            //        transfer->data_buffer[offset],
+            //        transfer->data_buffer[offset + 1],
+            //        transfer->data_buffer[offset + 2],
+            //        transfer->data_buffer[offset + 3]);
+
+            // Extrai os 3 bytes úteis do pacote USB MIDI de 4 bytes
+            uint8_t status = transfer->data_buffer[offset + 1];
+            uint8_t data1  = transfer->data_buffer[offset + 2];
+            uint8_t data2  = transfer->data_buffer[offset + 3];
+
+            // Envia direto para o processador central!
+            midi_processor_handle_message(status, data1, data2);
+            
             offset += MIDI_MESSAGE_LENGTH;
         }
 

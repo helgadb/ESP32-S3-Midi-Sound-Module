@@ -18,6 +18,7 @@
 
 #include "midi_uart.h"
 #include "midi_class_driver_txrx.h" // for midi_send_data and midi_driver_ready_for_tx
+#include "midi_processor.h" // Centraliza o tratamento MIDI
 
 static const char *TAG = "MIDI_UART";
 
@@ -98,10 +99,14 @@ void midi_uart_parse_and_send_to_usb(const uint8_t *data, size_t length)
                     cin = message_type >> 4;
                     if (pos + 2 < (int)length) {
                         usb_packet[0] = (cable_number << 4) | cin;
-                        usb_packet[1] = data[pos];
-                        usb_packet[2] = data[pos + 1];
-                        usb_packet[3] = data[pos + 2];
+                        usb_packet[1] = data[pos]; //Status
+                        usb_packet[2] = data[pos + 1]; // Dado 1 (nota)
+                        usb_packet[3] = data[pos + 2]; // Dado 2 (Velocity)
                         
+                        // --- ENVIAR PARA O PROCESSADOR CENTRAL ---
+                        midi_processor_handle_message(data[pos], data[pos + 1], data[pos + 2]);
+                        // -----------------------------------------
+
                         if (midi_driver_ready_for_tx()) {
                             midi_send_data(usb_packet, 4);
                         }

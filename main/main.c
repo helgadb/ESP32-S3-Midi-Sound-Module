@@ -10,13 +10,15 @@
 #include "midi_class_driver_txrx.h"
 #include "midi_uart.h"
 #include "led_rgb.h"
+#include "audio_sd_system.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "MIDI_MAIN";
 
 //==========================
 // CONFIGURATIONS
 //==========================
-#define DAEMON_TASK_PRIORITY    2
+#define DAEMON_TASK_PRIORITY    21
 #define CLASS_TASK_PRIORITY     3
 
 #define UART_TASK_PRIORITY      (CLASS_TASK_PRIORITY + 1)
@@ -147,6 +149,20 @@ void app_main(void)
     // Aguarda LED terminar a sequência
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    // Inicializa o sistema de som e armazenamento
+    init_audio_pcm5102a();
+    init_sd_card();
+
+    // Aguarda 2 segundos para dar tempo do cartão SD assentar e estabilizar
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // --- CARREGAR O ARQUIVO DA CAIXA DO SD PARA A RAM ---
+    load_snare_to_ram();
+    // ----------------------------------------------------
+
+    // Dispara a Task do Mixer de Áudio que gerencia a reprodução no Core 1
+    disparar_teste_de_audio();
+
     // Inicializar UART MIDI
     midi_uart_init();
 
@@ -192,4 +208,15 @@ void app_main(void)
 
     ESP_LOGI(TAG, "System Ready. MIDI pass-through active.");
     ESP_LOGI(TAG, "LED is BLUE = System running");
+
+    // Verifica o tamanho da PSRAM disponível
+    size_t psram_size = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI("PSRAM_TEST", "PSRAM total livre: %d bytes (%.2f MB)", 
+             psram_size, (float)psram_size / (1024.0f * 1024.0f));
+             
+    if (psram_size == 0) {
+        ESP_LOGE("PSRAM_TEST", "ERRO: PSRAM nao foi detectada! Verifique as configuracoes do menuconfig.");
+    } else {
+        ESP_LOGI("PSRAM_TEST", "PSRAM detectada com sucesso!");
+    }
 }

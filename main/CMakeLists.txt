@@ -5,6 +5,8 @@ idf_component_register(
         "midi_class_driver_txrx.c"
         "led_rgb.c"
         "usb_daemon.c"
+        "audio_sd_system.c"
+        "midi_processor.c"
     INCLUDE_DIRS 
         "."
     REQUIRES 
@@ -13,6 +15,8 @@ idf_component_register(
         esp_timer
         nvs_flash
         led_strip
+        fatfs
+        vfs          
     PRIV_REQUIRES 
         usb
 )
