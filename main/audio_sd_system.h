@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,21 +25,6 @@ void init_audio_pcm5102a(void);
 void init_sd_card(void);
 
 /**
- * @brief Carrega o arquivo de áudio "38.wav" do cartão SD diretamente para a PSRAM.
- * 
- * Esta função varre o arquivo ignorando metadados (como chunks LIST, JUNK, etc.)
- * e localiza o chunk de áudio bruto ("data"), alocando apenas os dados úteis.
- */
-void load_snare_to_ram(void);
-
-/**
- * @brief Ativa a reprodução instantânea do som da caixa (snare).
- * 
- * @param velocity Força do toque (padrão MIDI: 0 a 127). Controla o ganho do áudio.
- */
-void trigger_snare(uint8_t velocity);
-
-/**
  * @brief Escreve dados de áudio brutos diretamente no canal DMA do I2S.
  * 
  * @param buffer Ponteiro para o array de amostras de áudio (16-bit).
@@ -53,6 +39,9 @@ void audio_play_raw(const int16_t *buffer, size_t bytes_to_write);
  * I2S quente enviando silêncio quando não há áudio tocando para evitar cliques.
  */
 void audio_system_start(void);
+// Substitua a assinatura antiga por esta:
+void trigger_audio_buffer(int16_t *buffer, size_t sample_qty, uint8_t velocity, 
+                          int midi_note, int group, int off_by, int polyphony, bool is_silence);
 
 #ifdef __cplusplus
 }

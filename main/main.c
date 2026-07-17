@@ -13,6 +13,7 @@
 #include "led_rgb.h"
 #include "audio_sd_system.h"
 #include "esp_heap_caps.h"
+#include "sfz_parser.h"
 
 static const char *TAG = "MIDI_MAIN";
 
@@ -165,7 +166,8 @@ void app_main(void)
     //---------------------------------------------------------
     // 3. CARREGAMENTO DOS SAMPLES DO SD PARA A PSRAM
     //---------------------------------------------------------
-    load_snare_to_ram();
+    // Carrega o kit completo do SD para a PSRAM
+    sfz_parser_load_kit("/sdcard/TR808Kit.sfz");
 
     //---------------------------------------------------------
     // 4. ATIVAÇÃO DO MOTOR DE ÁUDIO POLIFÔNICO (Core 1)
@@ -173,6 +175,7 @@ void app_main(void)
     // Dispara a esteira de áudio e o mixer dedicados no Core 1
     audio_system_start();
 
+ 
     //---------------------------------------------------------
     // 5. INICIALIZAÇÃO DO ECOSSISTEMA MIDI
     //---------------------------------------------------------

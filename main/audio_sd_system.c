@@ -7,49 +7,70 @@
 #include "driver/sdmmc_host.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
-#include "esp_heap_caps.h" // Essencial para gerenciar a PSRAM
+#include "esp_heap_caps.h"
 #include "freertos/task.h"
 
 static const char *TAG = "SOUND_SYSTEM";
 
-//=============================================================================
-// CONFIGURAÇÕES DE HARDWARE (PINOS)
-//=============================================================================
-// Definição dos pinos do Áudio (PCM5102A)
+// Tabela de ganho recalculada para curva exponencial (Gain = (velocity / 127) ^ 1.5)
+// Normalizada para um teto seguro e potente de 0.85f (máximo volume antes de saturar o mixer)
+static const float VELOCITY_GAIN_LUT[128] = {
+    0.0000f, 0.0002f, 0.0005f, 0.0009f, 0.0014f, 0.0020f, 0.0027f, 0.0035f,
+    0.0044f, 0.0054f, 0.0065f, 0.0076f, 0.0088f, 0.0100f, 0.0113f, 0.0128f,
+    0.0143f, 0.0158f, 0.0174f, 0.0191f, 0.0209f, 0.0228f, 0.0247f, 0.0267f,
+    0.0287f, 0.0308f, 0.0330f, 0.0353f, 0.0377f, 0.0401f, 0.0426f, 0.0452f,
+    0.0478f, 0.0506f, 0.0534f, 0.0562f, 0.0591f, 0.0621f, 0.0652f, 0.0683f,
+    0.0715f, 0.0748f, 0.0781f, 0.0815f, 0.0850f, 0.0886f, 0.0921f, 0.0958f,
+    0.0995f, 0.1033f, 0.1072f, 0.1112f, 0.1152f, 0.1193f, 0.1234f, 0.1276f,
+    0.1319f, 0.1362f, 0.1406f, 0.1451f, 0.1497f, 0.1543f, 0.1590f, 0.1637f,
+    0.1685f, 0.1733f, 0.1782f, 0.1832f, 0.1883f, 0.1934f, 0.1986f, 0.2039f,
+    0.2092f, 0.2146f, 0.2200f, 0.2255f, 0.2311f, 0.2368f, 0.2425f, 0.2483f,
+    0.2541f, 0.2601f, 0.2660f, 0.2721f, 0.2782f, 0.2844f, 0.2906f, 0.2970f,
+    0.3033f, 0.3098f, 0.3163f, 0.3229f, 0.3295f, 0.3362f, 0.3430f, 0.3498f,
+    0.3567f, 0.3636f, 0.3707f, 0.3778f, 0.3849f, 0.3922f, 0.3995f, 0.4068f,
+    0.4143f, 0.4217f, 0.4293f, 0.4369f, 0.4446f, 0.4523f, 0.4601f, 0.4680f,
+    0.4759f, 0.4839f, 0.4920f, 0.5001f, 0.5083f, 0.5165f, 0.5248f, 0.5332f,
+    0.5416f, 0.5501f, 0.5587f, 0.5673f, 0.5760f, 0.5847f, 0.5935f, 0.8500f
+};
+
 #define I2S_BCK_IO           (GPIO_NUM_4)
 #define I2S_DIN_IO           (GPIO_NUM_7)
 #define I2S_WS_IO            (GPIO_NUM_6)
 
-// Definição dos pinos do Cartão SD (Modo SDMMC 1-bit)
 #define SDMMC_CMD_IO         (GPIO_NUM_11)
 #define SDMMC_CLK_IO         (GPIO_NUM_12)
 #define SDMMC_D0_IO          (GPIO_NUM_13)
 
-//=============================================================================
-// VARIÁVEIS GLOBAIS DO SISTEMA DE ÁUDIO
-//=============================================================================
 static i2s_chan_handle_t tx_chan = NULL;
 
-// Ponteiro para o buffer alocado obrigatoriamente na PSRAM
-static int16_t *snare_buffer = NULL;
-static size_t snare_samples_qty = 0;             // Quantidade de amostras (16-bit)
-
-// Variáveis de controle de reprodução (voláteis para comunicação segura entre cores)
-static volatile int playback_sample_index = -1;  // -1 significa que está em silêncio
-static volatile float playback_volume = 1.0f;
-
 //=============================================================================
-// CONTROLADORES DE HARDWARE (I2S & SD CARD)
+// GERENCIADOR DE POLIFONIA (12 VOZES SIMULTÂNEAS)
 //=============================================================================
+#define MAX_VOICES 12
 
-// 1. Inicialização do DAC PCM5102A com foco em baixíssima latência
+typedef struct {
+    int16_t *buffer;
+    size_t sample_qty;
+    volatile int playback_index; // -1 indica canal livre
+    volatile float volume;
+    int midi_note;
+    int group; 
+} audio_voice_t;
+
+static audio_voice_t voices[MAX_VOICES];
+
 void init_audio_pcm5102a(void) {
     ESP_LOGI(TAG, "Configurando PCM5102A para latencia extrema...");
     
+    // Inicializa a lista de vozes como inativas
+    for (int i = 0; i < MAX_VOICES; i++) {
+        voices[i].playback_index = -1;
+        voices[i].buffer = NULL;
+        voices[i].midi_note = -1;
+        voices[i].group = -1;
+    }
+
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    
-    // Reduzido ao limite operacional estável: 2 buffers de apenas 32 amostras
-    // Latência pura de hardware: (2 * 32) / 44100 = ~1.45 milissegundos!
     chan_cfg.dma_desc_num = 2; 
     chan_cfg.dma_frame_num = 32; 
 
@@ -71,12 +92,11 @@ void init_audio_pcm5102a(void) {
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
 }
 
-// 2. Inicialização do Barramento SDMMC do Cartão SD
 void init_sd_card(void) {
     ESP_LOGI(TAG, "Montando Cartao SD via SDMMC...");
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
-        .max_files = 5,
+        .max_files = 10, // Aumentado para suportar leitura dinâmica
         .allocation_unit_size = 16 * 1024
     };
     sdmmc_card_t *card;
@@ -93,163 +113,151 @@ void init_sd_card(void) {
     ESP_ERROR_CHECK(esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card));
 }
 
-// 3. Envio bruto de áudio diretamente para o barramento I2S DMA
 void audio_play_raw(const int16_t *buffer, size_t bytes_to_write) {
     if (tx_chan == NULL) return;
     size_t bytes_written = 0;
     i2s_channel_write(tx_chan, buffer, bytes_to_write, &bytes_written, portMAX_DELAY);
 }
 
-//=============================================================================
-// MANIPULAÇÃO DE ÁUDIO E ARQUIVOS (WAV -> PSRAM)
-//=============================================================================
-
-// Carrega o arquivo de áudio WAV do cartão SD diretamente para a PSRAM, pulando metadados
-void load_snare_to_ram(void) {
-    const char *file_path = "/sdcard/38.wav";
-    FILE *f = fopen(file_path, "rb");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Erro fatal: Nao foi possivel abrir %s", file_path);
-        return;
+// Encontra uma voz livre (ou rouba a mais antiga/avançada se necessário) e dispara
+void trigger_audio_buffer(int16_t *buffer, size_t sample_qty, uint8_t velocity, 
+                          int midi_note, int group, int off_by, int polyphony, bool is_silence) {
+    
+    // --- LÓGICA 1: OFF_BY (Corte cruzado, ex: Hi-Hat Aberto cortado por Hi-Hat Fechado) ---
+    if (off_by != -1) {
+        for (int i = 0; i < MAX_VOICES; i++) {
+            // Se a voz está tocando e pertence ao grupo que esta nova nota deve cortar
+            if (voices[i].playback_index >= 0 && voices[i].group == off_by) {
+                voices[i].playback_index = -1; // Interrompe o áudio imediatamente
+            }
+        }
     }
 
-    // Validação básica do cabeçalho RIFF/WAVE
-    char header[12];
-    if (fread(header, 1, 12, f) != 12 || memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
-        ESP_LOGE(TAG, "Erro: Arquivo %s nao e um WAV valido.", file_path);
-        fclose(f);
-        return;
-    }
+    // --- LÓGICA 2: POLYPHONY (Limite de vozes simultâneas por grupo) ---
+    if (group != -1 && polyphony > 0) {
+        int active_voices_in_group = 0;
+        int oldest_voice_idx = -1;
+        int max_progress = -1;
 
-    uint32_t data_size = 0;
-    uint32_t data_offset = 0;
-    char chunk_id[4];
-    uint32_t chunk_size;
-
-    // Varre os subchunks do arquivo procurando pelo bloco de áudio ("data")
-    while (fread(chunk_id, 1, 4, f) == 4) {
-        if (fread(&chunk_size, 4, 1, f) != 1) {
-            break;
+        for (int i = 0; i < MAX_VOICES; i++) {
+            if (voices[i].playback_index >= 0 && voices[i].group == group) {
+                active_voices_in_group++;
+                // A voz com maior índice de reprodução está mais perto do fim (mais antiga)
+                if (voices[i].playback_index > max_progress) {
+                    max_progress = voices[i].playback_index;
+                    oldest_voice_idx = i;
+                }
+            }
         }
 
-        if (memcmp(chunk_id, "data", 4) == 0) {
-            data_size = chunk_size;
-            data_offset = ftell(f); // Guarda a posição exata onde o áudio bruto começa
+        // Se estourar o limite de polifonia do grupo, desativa a voz mais antiga dele
+        if (active_voices_in_group >= polyphony && oldest_voice_idx != -1) {
+            voices[oldest_voice_idx].playback_index = -1;
+        }
+    }
+
+    // --- LÓGICA 3: SAMPLE=*SILENCE ---
+    if (is_silence) {
+        // Regiões de silêncio servem apenas para disparar o "off_by" (mutes).
+        // Como o corte já foi processado acima, encerramos sem ocupar canais de áudio reais.
+        return; 
+    }
+
+    if (buffer == NULL || sample_qty == 0) return;
+
+    int target_voice = -1;
+
+    // Procura canal livre
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (voices[i].playback_index == -1) {
+            target_voice = i;
             break;
         }
-
-        // Se não for o chunk "data" (como LIST ou JUNK), pula mantendo o alinhamento de Word do RIFF
-        uint32_t skip_size = (chunk_size + 1) & ~1;
-        fseek(f, skip_size, SEEK_CUR);
     }
 
-    if (data_size == 0 || data_offset == 0) {
-        ESP_LOGE(TAG, "Erro: Bloco de audio 'data' nao encontrado no WAV.");
-        fclose(f);
-        return;
+    // Voice Stealing global padrão se faltar canais gerais
+    if (target_voice == -1) {
+        int max_index = -1;
+        for (int i = 0; i < MAX_VOICES; i++) {
+            if (voices[i].playback_index > max_index) {
+                max_index = voices[i].playback_index;
+                target_voice = i;
+            }
+        }
     }
 
-    // Define o tamanho em amostras (cada amostra de 16 bits tem 2 bytes)
-    snare_samples_qty = data_size / sizeof(int16_t);
-
-    // Aloca memória exclusivamente na PSRAM para caber o arquivo inteiro
-    snare_buffer = (int16_t *)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    
-    if (snare_buffer == NULL) {
-        ESP_LOGE(TAG, "Erro: Memoria PSRAM insuficiente!");
-        fclose(f);
-        return;
+    if (target_voice != -1) {
+        voices[target_voice].buffer = buffer;
+        voices[target_voice].sample_qty = sample_qty;
+        voices[target_voice].midi_note = midi_note; // Salva metadado
+        voices[target_voice].group = group;         // Salva metadado
+        
+        if (velocity > 127) velocity = 127;
+        voices[target_voice].volume = VELOCITY_GAIN_LUT[velocity]; 
+        voices[target_voice].playback_index = 0; 
     }
-
-    // Lê os dados brutos de áudio do SD, jogando-os na PSRAM
-    fseek(f, data_offset, SEEK_SET);
-    size_t bytes_read = fread(snare_buffer, 1, data_size, f);
-    
-    ESP_LOGI(TAG, "Sucesso: %d bytes (%d amostras) carregados na PSRAM. Metadados descartados!", 
-             bytes_read, snare_samples_qty);
-    fclose(f);
 }
 
-// Ativa a reprodução setando o volume baseado no Velocity do MIDI e reinicia o ponteiro
-void trigger_snare(uint8_t velocity) {
-    if (snare_buffer == NULL || velocity == 0) return;
-
-    playback_volume = (float)velocity / 127.0f;
-    playback_sample_index = 0; // Inicia na amostra zero de forma atômica
-}
-
-//=============================================================================
-// MOTORES DE EXECUÇÃO (TASKS FREE_RTOS)
-//=============================================================================
-
-// Task contínua que mantém a esteira do DMA do I2S aquecida (evita estalos e cliques)
+// Task de mistura em tempo real (Soma polifônica)
 static void audio_player_task(void *pvParameters) {
-    // 64 amostras de 16 bits = 128 bytes por bloco
     #define CHUNK_SIZE_SAMPLES 64 
     int16_t temp_buffer[CHUNK_SIZE_SAMPLES];
 
     while (1) {
-        if (playback_sample_index >= 0 && snare_buffer != NULL) {
-            size_t samples_to_play = CHUNK_SIZE_SAMPLES;
-            bool finished = false;
+        // Zera o buffer temporário de mistura
+        int32_t mixed_samples[CHUNK_SIZE_SAMPLES] = {0};
+        bool active_sound = false;
 
-            // Evita leitura além do limite real do arquivo alocado na PSRAM
-            if (playback_sample_index + samples_to_play > snare_samples_qty) {
-                samples_to_play = snare_samples_qty - playback_sample_index;
-                finished = true;
-            }
+        for (int v = 0; v < MAX_VOICES; v++) {
+            if (voices[v].playback_index >= 0 && voices[v].buffer != NULL) {
+                active_sound = true;
+                int start_idx = voices[v].playback_index;
+                size_t qty = voices[v].sample_qty;
+                float vol = voices[v].volume;
 
-            if (samples_to_play > 0) {
-                // Copia as amostras aplicando o ganho do Velocity do MIDI
-                for (size_t i = 0; i < samples_to_play; i++) {
-                    int32_t sample = (int32_t)(snare_buffer[playback_sample_index + i] * playback_volume);
-                    
-                    // Limitador digital (Anti-clipping) para proteger os amplificadores
-                    if (sample > 32767) sample = 32767;
-                    else if (sample < -32768) sample = -32768;
-                    
-                    temp_buffer[i] = (int16_t)sample;
-                }
-
-                // Aplica fadeout rápido de atenuação no bloco final para evitar cliques
-                if (finished) {
-                    for (size_t i = 0; i < samples_to_play; i++) {
-                        uint32_t fade_factor = 256 - ((i * 256) / samples_to_play);
-                        temp_buffer[i] = (int16_t)((temp_buffer[i] * fade_factor) >> 8);
+                for (size_t i = 0; i < CHUNK_SIZE_SAMPLES; i++) {
+                    int current_sample_pos = start_idx + i;
+                    if (current_sample_pos < qty) {
+                        mixed_samples[i] += (int32_t)(voices[v].buffer[current_sample_pos] * vol);
                     }
                 }
-
-                // Completa o buffer restante com silêncio caso o arquivo acabe no meio do chunk
-                if (samples_to_play < CHUNK_SIZE_SAMPLES) {
-                    memset(&temp_buffer[samples_to_play], 0, (CHUNK_SIZE_SAMPLES - samples_to_play) * sizeof(int16_t));
+                
+                voices[v].playback_index += CHUNK_SIZE_SAMPLES;
+                if (voices[v].playback_index >= qty) {
+                    voices[v].playback_index = -1; // Desativa canal finalizado
                 }
-
-                playback_sample_index += samples_to_play;
             }
-
-            if (finished) {
-                playback_sample_index = -1; // Desliga a reprodução do player
-            }
-        } else {
-            // Silêncio digital absoluto para manter o barramento I2S operante sem ruídos
-            memset(temp_buffer, 0, CHUNK_SIZE_SAMPLES * sizeof(int16_t));
         }
 
-        // Escreve os dados tratados no DMA do I2S
+        if (active_sound) {
+            // Conversão de 32-bit para 16-bit com algoritmo Soft Clipper funcional
+            for (size_t i = 0; i < CHUNK_SIZE_SAMPLES; i++) {
+                int32_t s = mixed_samples[i];
+                
+                // Limite a partir do qual a compressão suave começa (~75% da amplitude máxima)
+                int32_t threshold = 24576; 
+                
+                if (s > threshold) {
+                    s = threshold + ((s - threshold) / 3);
+                } else if (s < -threshold) {
+                    s = -threshold + ((s + threshold) / 3);
+                }
+                
+                // Hard limiting final de segurança contra estouros absolutos
+                if (s > 32767) s = 32767;
+                else if (s < -32768) s = -32768;
+                
+                temp_buffer[i] = (int16_t)s;
+            }
+        } else {
+            memset(temp_buffer, 0, sizeof(temp_buffer));
+        }
+
         audio_play_raw(temp_buffer, CHUNK_SIZE_SAMPLES * sizeof(int16_t));
     }
 }
 
-// Inicializa a task de áudio de tempo real travada no Core 1 (substituta da antiga disparar_teste_de_audio)
 void audio_system_start(void) {
-    xTaskCreatePinnedToCore(
-        audio_player_task,
-        "audio_player",
-        4096,
-        NULL,
-        22, // Prioridade de tempo real máxima (acima de tarefas de sistema)
-        NULL,
-        1   // Travado estritamente no Core 1
-    );
-    ESP_LOGI(TAG, "Motor de Audio de Baixissima Latencia Ativado no Core 1.");
+    xTaskCreatePinnedToCore(audio_player_task, "audio_player", 4096, NULL, 22, NULL, 1);
+    ESP_LOGI(TAG, "Mixer Polifonico de 12 Vozes Ativado.");
 }

@@ -7,6 +7,7 @@ idf_component_register(
         "usb_daemon.c"
         "audio_sd_system.c"
         "midi_processor.c"
+        "sfz_parser.c"
     INCLUDE_DIRS 
         "."
     REQUIRES 
